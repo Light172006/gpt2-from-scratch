@@ -42,6 +42,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd,4*config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4*config.n_embd,config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self,x):
         x = self.c_fc(x)
@@ -92,7 +93,10 @@ class GPT(nn.Module):
 
     def init_weight(self,Module):
         if isinstance(Module,nn.Linear):
-            torch.nn.init.normal_(Module.weight, mean = 0.0, std = 0.02)
+            std = 0.02
+            if hasattr(Module, 'NANOGPT_SCALE_INIT'):
+                std *= (2*self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(Module.weight, mean = 0.0, std = std)
             if Module.bias is not None:
                 torch.nn.init.zeros_(Module.bias)
         elif isinstance(Module,nn.Embedding):
