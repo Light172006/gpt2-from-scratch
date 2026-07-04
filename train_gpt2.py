@@ -86,6 +86,17 @@ class GPT(nn.Module):
         ))
 
         self.lm_head = nn.Linear(config.n_embd,config.vocab_size,bias=False)
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self.init_weight)
+
+    def init_weight(self,Module):
+        if isinstance(Module,nn.Linear):
+            torch.nn.init.normal_(Module.weight, mean = 0.0, std = 0.02)
+            if Module.bias is not None:
+                torch.nn.init.zeros_(Module.bias)
+        elif isinstance(Module,nn.Embedding):
+            torch.nn.init.normal_(Module.weight, mean = 0.0, std = 0.02)
 
     def forward(self,idx,target = None):
 
@@ -161,7 +172,39 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-    
+
+import tiktoken
+
+class Data_Loader:
+    def __init__(self,B,T):
+        self.B = B
+        self.T = T
+
+        with open('/home/debjit/projects/gpt2-from-scratch/Tiny_Shakespear.txt', 'r') as f:
+            text = f.read()
+        
+        self.enc = tiktoken.get_encoding('gpt2')
+        self.token = self.enc.encode(text)
+        print(f'loaded : {len(self.token)}')
+        print(f'1st epoch batch of {len(self.token)//(B*T)}')
+
+        self.current_state = 0
+
+    def next_token(self):
+        B = self.B
+        T = self.T
+
+        buf = torch.tensor(self.token[self.current_state:self.current_state + B*T + 1])
+        x = buf[:-1].view(B,T)
+        y = buf[1:].view(B,T)
+
+        self.current_state += B*T+1
+
+        if(self.current_state + B*T + 1 > len(self.token)):
+            self.current_state = 0
+
+        return x,y
+
 
 #auto detection of device
 
@@ -173,24 +216,26 @@ elif hasattr(torch.backends, 'mps') and torch.mps.is_available():
 
 print(f'Using Device : {device}')
 
-import tiktoken
-
-with open('/home/debjit/projects/gpt2-from-scratch/Tiny_Shakespear.txt', 'r') as f:
-    text = f.read()
-data = text[:1000] # first 1,000 characters
-
-B,T = 4, 32
-enc = tiktoken.get_encoding('gpt2')
-token = enc.encode(data)
-buf = torch.tensor(token[:B*T + 1])
-x = buf[:-1].view(B, T).to(device)
-y = buf[1:].view(B, T).to(device)
-
-
-
 model = GPT.from_pretrained('gpt2')
 model.eval()
 model.to(device)
+
+training_data = Data_Loader(4,32)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr= 3e-4)
+
+for i in range(50):
+    optimizer.zero_grad()
+    x,y = training_data.next_token()
+    x = x.to(device)
+    y = y.to(device)
+    logits , loss = model(x,y)
+    loss.backward()
+    optimizer.step()
+    print(f' step {i+1} : loss -> {loss.item()}')
+
+import sys 
+sys.exit(0)
 
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
