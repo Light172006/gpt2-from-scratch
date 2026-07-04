@@ -87,6 +87,31 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embd,config.vocab_size,bias=False)
 
+    def forward(self,idx,target = None):
+
+        B,T = idx.size()
+
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+
+        pos = torch.arange(0,T,dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos)
+        token_emb = self.transformer.wte(idx)
+
+        x = pos_emb + token_emb
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+
+        logits = self.lm_head(x)
+        loss = None
+
+        if target is not None:
+            loss = F.cross_entropy(logits.view(-1,logits.size(-1)),target.view(-1))
+
+        return logits,loss
+
     
     @classmethod
     def from_pretrained(cls, model_type):
@@ -138,5 +163,58 @@ class GPT(nn.Module):
         return model
     
 
+#auto detection of device
+
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, 'mps') and torch.mps.is_available():
+    device = 'mps'
+
+print(f'Using Device : {device}')
+
+import tiktoken
+
+with open('/home/debjit/projects/gpt2-from-scratch/Tiny_Shakespear.txt', 'r') as f:
+    text = f.read()
+data = text[:1000] # first 1,000 characters
+
+B,T = 4, 32
+enc = tiktoken.get_encoding('gpt2')
+token = enc.encode(data)
+buf = torch.tensor(token[:B*T + 1])
+x = buf[:-1].view(B, T).to(device)
+y = buf[1:].view(B, T).to(device)
+
+
+
 model = GPT.from_pretrained('gpt2')
-print('didnt crash yaahh')
+model.eval()
+model.to(device)
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < 50:
+    # forward the model to get the logits
+    with torch.no_grad():
+        logits = model(x)[0] # (B, T, vocab_size)
+        # take the logits at the last position
+        logits = logits[:, -1, :] # (B, vocab_size)
+        # get the probabilities
+        probs = F.softmax(logits, dim=-1)
+        # do top-k sampling of 50 (huggingface pipeline default)
+        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        # select a token from the top-k probabilities
+        # note: multinomial does not demand the input to sum to 1
+        ix = torch.multinomial(topk_probs, 1) # (B, 1)
+        # gather the corresponding indices
+        xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+        # append to the sequence
+        x = torch.cat((x, xcol), dim=1)
+
+
+for i in range(4):
+    token = x[i,:50].tolist()
+    decode = enc.decode(token)
+    print('-->  ' + decode)
