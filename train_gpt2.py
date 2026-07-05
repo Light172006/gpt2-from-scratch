@@ -220,23 +220,36 @@ elif hasattr(torch.backends, 'mps') and torch.mps.is_available():
 
 print(f'Using Device : {device}')
 
-model = GPT.from_pretrained('gpt2')
+torch.set_float32_matmul_precision('high')
+
+model = GPT(GPTConfig())
 model.eval()
 model.to(device)
+#model = torch.compile(model)
 
-training_data = Data_Loader(4,32)
+training_data = Data_Loader(8,1024)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr= 3e-4)
 
-for i in range(50):
+import time
+
+for i in range(20):
+    t0 = time.time()
     optimizer.zero_grad()
     x,y = training_data.next_token()
     x = x.to(device)
     y = y.to(device)
-    logits , loss = model(x,y)
+
+    with torch.autocast(device_type = device, dtype=torch.bfloat16):
+        logits , loss = model(x,y)
     loss.backward()
     optimizer.step()
-    print(f' step {i+1} : loss -> {loss.item()}')
+
+    torch.cuda.synchronize()
+    t1 = time.time()
+    t = (t1 - t0)*1000
+    token_per_sec = (training_data.B*training_data.T)/(t1-t0)
+    print(f' step {i+1} : loss -> {loss.item()} : time -> {t} : token per sec : {token_per_sec}' )
 
 import sys 
 sys.exit(0)
