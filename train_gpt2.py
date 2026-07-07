@@ -201,6 +201,13 @@ class GPT(nn.Module):
 
         return model
 
+total_batch = 524288
+B = 8
+T = 1024
+assert total_batch % (B*T) == 0
+gradient_accumulate = total_batch//(B*T)
+
+
 import tiktoken
 
 class Data_Loader:
@@ -248,8 +255,8 @@ torch.set_float32_matmul_precision('high')
 
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_step = 10
-max_step = 50
+warm_step = 2
+max_step = 5
 
 def get_lr(itr):
     if itr < warm_step:
@@ -278,13 +285,17 @@ import time
 for step in range(max_step):
     t0 = time.time()
     optimizer.zero_grad()
-    x,y = training_data.next_token()
-    x = x.to(device)
-    y = y.to(device)
+    loss_acc = 0
+    for i in range(gradient_accumulate):
+        x,y = training_data.next_token()
+        x = x.to(device)
+        y = y.to(device)
 
-    with torch.autocast(device_type = device, dtype=torch.bfloat16):
-        logits , loss = model(x,y)
-    loss.backward()
+        with torch.autocast(device_type = device, dtype=torch.bfloat16):
+            logits , loss = model(x,y)
+        loss += loss/gradient_accumulate
+        loss_acc = loss.detach()
+        loss.backward()
 
     norm = torch.nn.utils.clip_grad_norm_(model.parameters (),1)
 
@@ -297,8 +308,8 @@ for step in range(max_step):
     torch.cuda.synchronize()
     t1 = time.time()
     t = (t1 - t0)
-    token_per_sec = (training_data.B*training_data.T)/(t1-t0)
-    print(f' step {step+1} : loss -> {loss.item():.3f} : norm -> {norm:.3f} : time -> {t:.2f} : token per sec : {token_per_sec:.0f} : lr -> {lr}' )
+    token_per_sec = (gradient_accumulate*training_data.B*training_data.T)/t
+    print(f' step {step+1} : loss -> {loss_acc.item():.3f} : norm -> {norm:.3f} : time -> {t:.2f} : token per sec : {token_per_sec:.0f} : lr -> {lr}' )
 
 import sys 
 sys.exit(0)
