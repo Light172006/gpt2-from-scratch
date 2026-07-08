@@ -210,7 +210,6 @@ assert total_batch % (B*T) == 0
 gradient_accumulate = total_batch//(B*T)
 
 
-import tiktoken
 import numpy as np
 
 def load_tokens(filename):
