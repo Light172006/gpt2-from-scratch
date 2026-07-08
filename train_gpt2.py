@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+import time
 import inspect
 import math
+import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -209,21 +211,38 @@ gradient_accumulate = total_batch//(B*T)
 
 
 import tiktoken
+import numpy as np
+
+def load_tokens(filename):
+    npt = np.load(filename)
+    ppt = torch.tensor(npt, dtype=torch.long)
+
+    return ppt
+
+
 
 class Data_Loader:
-    def __init__(self,B,T):
+    def __init__(self,B,T,split):
         self.B = B
         self.T = T
+        assert split in {'train','val'}
 
-        with open('/home/debjit/projects/gpt2-from-scratch/Tiny_Shakespear.txt', 'r') as f:
-            text = f.read()
-        
-        self.enc = tiktoken.get_encoding('gpt2')
-        self.token = self.enc.encode(text)
-        print(f'loaded : {len(self.token)}')
-        print(f'1st epoch batch of {len(self.token)//(B*T)}')
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        print(f"found {len(shards)} shards for split {split}")
+        self.reset()
 
-        self.current_state = 0
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T 
 
     def next_token(self):
         B = self.B
@@ -236,7 +255,9 @@ class Data_Loader:
         self.current_state += B*T+1
 
         if(self.current_state + B*T + 1 > len(self.token)):
-            self.current_state = 0
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T
 
         return x,y
 
@@ -255,8 +276,8 @@ torch.set_float32_matmul_precision('high')
 
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_step = 2
-max_step = 5
+warm_step = 715
+max_step = 19073
 
 def get_lr(itr):
     if itr < warm_step:
@@ -276,14 +297,42 @@ model.eval()
 model.to(device)
 #model = torch.compile(model)
 
-training_data = Data_Loader(8,1024)
+training_data = Data_Loader(B=B,T= T, split='train')
+val_data = Data_Loader(B=B,T= T, split='val')
 
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
 
-import time
+log_dir = 'log'
+os.makedirs(log_dir,exist_ok=True)
+log_file = os.path.join(log_dir, f'log.txt')
+with open(log_file,'w') as f:
+    pass
 
 for step in range(max_step):
     t0 = time.time()
+    last_step = (step == max_step-1)
+    
+    # validation loop
+    if step % 250 == 0 or last_step:
+        model.eval()
+        val_data.reset()
+
+        with torch.no_grad:
+            val_step = 20
+            val_loss_acc = 0
+            for _ in range(val_step):
+                x,y = val_data.next_token()
+                x = x.to(device)
+                y = y.to(device)
+                with torch.autocast(device_type = device, dtype=torch.bfloat16):
+                    logits , loss = model(x,y)
+                loss += loss/gradient_accumulate
+                val_loss_acc = loss.detach()
+            
+            print(f'val loss : {val_loss_acc}')
+
+
+    # training loop
     optimizer.zero_grad()
     loss_acc = 0
     for i in range(gradient_accumulate):
@@ -311,32 +360,3 @@ for step in range(max_step):
     token_per_sec = (gradient_accumulate*training_data.B*training_data.T)/t
     print(f' step {step+1} : loss -> {loss_acc.item():.3f} : norm -> {norm:.3f} : time -> {t:.2f} : token per sec : {token_per_sec:.0f} : lr -> {lr}' )
 
-import sys 
-sys.exit(0)
-
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1) < 50:
-    # forward the model to get the logits
-    with torch.no_grad():
-        logits = model(x)[0] # (B, T, vocab_size)
-        # take the logits at the last position
-        logits = logits[:, -1, :] # (B, vocab_size)
-        # get the probabilities
-        probs = F.softmax(logits, dim=-1)
-        # do top-k sampling of 50 (huggingface pipeline default)
-        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        # select a token from the top-k probabilities
-        # note: multinomial does not demand the input to sum to 1
-        ix = torch.multinomial(topk_probs, 1) # (B, 1)
-        # gather the corresponding indices
-        xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-        # append to the sequence
-        x = torch.cat((x, xcol), dim=1)
-
-
-for i in range(4):
-    token = x[i,:50].tolist()
-    decode = enc.decode(token)
-    print('-->  ' + decode)
