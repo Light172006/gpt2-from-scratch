@@ -6,6 +6,7 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from hellaswag import render_example, iterate_examples
 
 class CasualSelfAttention(nn.Module):
     def __init__(self,config):
@@ -290,6 +291,24 @@ def get_lr(itr):
 
     return min_lr + coeff*(max_lr-min_lr)
 
+def get_most_likely_row(tokens, mask, logits):
+    # evaluate the autoregressive loss at all positions
+    shift_logits = (logits[..., :-1, :]).contiguous()
+    shift_tokens = (tokens[..., 1:]).contiguous()
+    flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_shift_tokens = shift_tokens.view(-1)
+    shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
+    shift_losses = shift_losses.view(tokens.size(0), -1)
+    # now get the average loss just for the completion region (where mask == 1), in each row
+    shift_mask = (mask[..., 1:]).contiguous() # we must shift mask, so we start at the last prompt token
+    masked_shift_losses = shift_losses * shift_mask
+    # sum and divide by the number of 1s in the mask
+    sum_loss = masked_shift_losses.sum(dim=1)
+    avg_loss = sum_loss / shift_mask.sum(dim=1)
+    # now we have a loss for each of the 4 completions
+    # the one with the lowest loss should be the most likely
+    pred_norm = avg_loss.argmin().item()
+    return pred_norm
 
 model = GPT(GPTConfig())
 model.eval()
@@ -328,7 +347,44 @@ for step in range(max_step):
                 loss += loss/gradient_accumulate
                 val_loss_acc = loss.detach()
             
-            print(f'val loss : {val_loss_acc}')
+            print(f'val loss : {val_loss_acc.item():.4f}')
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_acc.item():.4f}\n")
+            if step > 0 and (step % 5000 == 0 or last_step):
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': model.state_dict(),
+                    'config': model.config,
+                    'step': step,
+                    'val_loss': val_loss_acc.item()
+                }
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(checkpoint, checkpoint_path)
+    
+
+    # once in a while evaluate hellaswag
+    if (step % 250 == 0 or last_step):
+        num_correct_norm = 0
+        num_total = 0
+        for i, example in enumerate(iterate_examples("val")):
+            # render the example into tokens and labels
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            # get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += int(pred_norm == label)
+
+        acc_norm = num_correct_norm / num_total
+        print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} hella {acc_norm:.4f}\n")
 
 
     # training loop
@@ -358,4 +414,7 @@ for step in range(max_step):
     t = (t1 - t0)
     token_per_sec = (gradient_accumulate*training_data.B*training_data.T)/t
     print(f' step {step+1} : loss -> {loss_acc.item():.3f} : norm -> {norm:.3f} : time -> {t:.2f} : token per sec : {token_per_sec:.0f} : lr -> {lr}' )
+    with open(log_file,'a') as f:
+        f.write(f'{step} train {loss_acc.item():.4f}\n')
 
+torch.save(model, 'model.pkl')
