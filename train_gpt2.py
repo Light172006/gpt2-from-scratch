@@ -248,13 +248,13 @@ class Data_Loader:
         B = self.B
         T = self.T
 
-        buf = torch.tensor(self.token[self.current_state:self.current_state + B*T + 1])
+        buf = self.tokens[self.current_shard:self.current_shard + B*T + 1].clone().detach()
         x = buf[:-1].view(B,T)
         y = buf[1:].view(B,T)
 
-        self.current_state += B*T+1
+        self.current_shard += B*T+1
 
-        if(self.current_state + B*T + 1 > len(self.token)):
+        if(self.current_shard + B*T + 1 > len(self.tokens)):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = B * T
@@ -276,8 +276,8 @@ torch.set_float32_matmul_precision('high')
 
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_step = 715
-max_step = 19073
+warm_step = 4 #715
+max_step = 100 #19073
 
 def get_lr(itr):
     if itr < warm_step:
@@ -331,11 +331,11 @@ for step in range(max_step):
     last_step = (step == max_step-1)
     
     # validation loop
-    if step % 250 == 0 or last_step:
+    if step % 5 == 0 or last_step:
         model.eval()
         val_data.reset()
 
-        with torch.no_grad:
+        with torch.no_grad():
             val_step = 20
             val_loss_acc = 0
             for _ in range(val_step):
@@ -349,7 +349,7 @@ for step in range(max_step):
             
             print(f'val loss : {val_loss_acc.item():.4f}')
             with open(log_file, "a") as f:
-                f.write(f"{step} val {val_loss_acc.item():.4f}\n")
+                f.write(f"{step+1} val {val_loss_acc.item():.4f}\n")
             if step > 0 and (step % 5000 == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
@@ -365,7 +365,7 @@ for step in range(max_step):
     
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step):
+    if (step % 5 == 0 or last_step):
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -384,7 +384,7 @@ for step in range(max_step):
         acc_norm = num_correct_norm / num_total
         print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
         with open(log_file, "a") as f:
-            f.write(f"{step} hella {acc_norm:.4f}\n")
+            f.write(f"{step+1} hella {acc_norm:.4f}\n")
 
 
     # training loop
@@ -415,6 +415,6 @@ for step in range(max_step):
     token_per_sec = (gradient_accumulate*training_data.B*training_data.T)/t
     print(f' step {step+1} : loss -> {loss_acc.item():.3f} : norm -> {norm:.3f} : time -> {t:.2f} : token per sec : {token_per_sec:.0f} : lr -> {lr}' )
     with open(log_file,'a') as f:
-        f.write(f'{step} train {loss_acc.item():.4f}\n')
+        f.write(f'{step+1} train {loss_acc.item():.4f}\n')
 
 torch.save(model, 'model.pkl')
